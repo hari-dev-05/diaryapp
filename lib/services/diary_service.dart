@@ -18,22 +18,36 @@ class DiaryApiException implements Exception {
 }
 
 class DiaryService {
-  static const String _localKey = 'diary_entries';
-  static const String _migratedKey = 'diary_entries_migrated';
   static const Duration _timeout = Duration(seconds: 10);
 
-  Map<String, String> get _headers => {
+  Map<String, String> _buildHeaders(String? token) => {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
       };
 
-  /// Helper to interpret network / HTTP errors into clear, friendly messages
+  /// User-specific offline cache key to guarantee cross-user data isolation
+  String _userCacheKey(String userId) => 'diary_entries_user_$userId';
+
+  /// Safely retrieves active base URL for error messages
+  String get _safeBaseUrl {
+    try {
+      return ApiConfig.baseUrl;
+    } catch (_) {
+      return 'the backend';
+    }
+  }
+
+  /// Helper to format network / HTTP / configuration errors into friendly messages
   String _friendlyErrorMessage(dynamic error) {
+    if (error is StateError) {
+      return error.message;
+    }
     if (error is SocketException) {
-      return 'Network connection failed. Please ensure the backend server is running and accessible at ${ApiConfig.baseUrl}.';
+      return 'Network connection failed. Please ensure the backend is reachable at $_safeBaseUrl.';
     }
     if (error is TimeoutException) {
-      return 'Server request timed out. Please verify your connection to ${ApiConfig.baseUrl}.';
+      return 'Server request timed out. Please verify your connection to $_safeBaseUrl.';
     }
     if (error is DiaryApiException) {
       return error.message;
@@ -41,12 +55,20 @@ class DiaryService {
     return 'An error occurred: $error';
   }
 
-  /// Retrieve all diary notes from MongoDB via GET /api/notes
-  Future<List<DiaryEntry>> loadEntries() async {
-    final uri = Uri.parse(ApiConfig.notesEndpoint);
+  /// Retrieve diary notes belonging exclusively to the authenticated user
+  Future<List<DiaryEntry>> loadEntries({
+    required String? token,
+    required String? userId,
+  }) async {
+    if (token == null || token.isEmpty || userId == null || userId.isEmpty) {
+      throw DiaryApiException('Authentication required. Please log in to view your notes.', 401);
+    }
 
     try {
-      final response = await http.get(uri, headers: _headers).timeout(_timeout);
+      final uri = Uri.parse(ApiConfig.notesEndpoint);
+      final response = await http
+          .get(uri, headers: _buildHeaders(token))
+          .timeout(_timeout);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final dynamic decoded = json.decode(response.body);
@@ -62,48 +84,65 @@ class DiaryService {
 
         final entries = list.map((item) => DiaryEntry.fromJson(item)).toList();
 
-        // Update local offline backup with the latest data from MongoDB
-        await _saveOfflineCache(entries);
+        // Update user-isolated offline cache with fresh notes
+        await _saveUserOfflineCache(userId, entries);
 
         return entries;
+      } else if (response.statusCode == 401) {
+        throw DiaryApiException('Session expired or unauthorized. Please log in again.', 401);
       } else {
-        final message = _extractErrorMessage(response.body, 'Failed to fetch notes (${response.statusCode})');
+        final message = _extractErrorMessage(
+            response.body, 'Failed to fetch notes (${response.statusCode})');
         throw DiaryApiException(message, response.statusCode);
       }
     } catch (e) {
       debugPrint('DiaryService.loadEntries error: $e');
-      // If server is unreachable, load from local cache if available so app remains usable offline
-      final cached = await _loadOfflineCache();
+
+      // Offline resilience: Serve only the current user's isolated local cache
+      final cached = await _loadUserOfflineCache(userId);
       if (cached.isNotEmpty) {
-        debugPrint('Serving ${cached.length} entries from offline cache due to connection issue.');
+        debugPrint('Serving ${cached.length} entries from offline cache for user $userId.');
         return cached;
       }
       throw DiaryApiException(_friendlyErrorMessage(e));
     }
   }
 
-  /// Create a new diary note in MongoDB via POST /api/notes
-  Future<DiaryEntry> createEntry(String title, String content) async {
-    final uri = Uri.parse(ApiConfig.notesEndpoint);
-    final payload = json.encode({
-      'title': title.trim(),
-      'content': content.trim(),
-    });
+  /// Create a new diary note in MongoDB for the authenticated user
+  Future<DiaryEntry> createEntry({
+    required String? token,
+    required String? userId,
+    required String title,
+    required String content,
+  }) async {
+    if (token == null || token.isEmpty) {
+      throw DiaryApiException('Authentication required. Please log in.', 401);
+    }
 
     try {
+      final uri = Uri.parse(ApiConfig.notesEndpoint);
+      final payload = json.encode({
+        'title': title.trim(),
+        'content': content.trim(),
+      });
+
       final response = await http
-          .post(uri, headers: _headers, body: payload)
+          .post(uri, headers: _buildHeaders(token), body: payload)
           .timeout(_timeout);
 
       if (response.statusCode == 201 || response.statusCode == 200) {
         final dynamic decoded = json.decode(response.body);
-        final dynamic noteData = (decoded is Map<String, dynamic> && decoded['data'] != null)
-            ? decoded['data']
-            : decoded;
+        final dynamic noteData =
+            (decoded is Map<String, dynamic> && decoded['data'] != null)
+                ? decoded['data']
+                : decoded;
 
         return DiaryEntry.fromJson(noteData);
+      } else if (response.statusCode == 401) {
+        throw DiaryApiException('Session expired. Please log in again.', 401);
       } else {
-        final message = _extractErrorMessage(response.body, 'Failed to save note (${response.statusCode})');
+        final message = _extractErrorMessage(
+            response.body, 'Failed to save note (${response.statusCode})');
         throw DiaryApiException(message, response.statusCode);
       }
     } catch (e) {
@@ -112,28 +151,43 @@ class DiaryService {
     }
   }
 
-  /// Update an existing diary note in MongoDB via PUT /api/notes/:id
-  Future<DiaryEntry> updateEntry(String id, String title, String content) async {
-    final uri = Uri.parse('${ApiConfig.notesEndpoint}/$id');
-    final payload = json.encode({
-      'title': title.trim(),
-      'content': content.trim(),
-    });
+  /// Update an existing diary note belonging to the authenticated user
+  Future<DiaryEntry> updateEntry({
+    required String? token,
+    required String id,
+    required String title,
+    required String content,
+  }) async {
+    if (token == null || token.isEmpty) {
+      throw DiaryApiException('Authentication required. Please log in.', 401);
+    }
 
     try {
+      final uri = Uri.parse('${ApiConfig.notesEndpoint}/$id');
+      final payload = json.encode({
+        'title': title.trim(),
+        'content': content.trim(),
+      });
+
       final response = await http
-          .put(uri, headers: _headers, body: payload)
+          .put(uri, headers: _buildHeaders(token), body: payload)
           .timeout(_timeout);
 
       if (response.statusCode == 200) {
         final dynamic decoded = json.decode(response.body);
-        final dynamic noteData = (decoded is Map<String, dynamic> && decoded['data'] != null)
-            ? decoded['data']
-            : decoded;
+        final dynamic noteData =
+            (decoded is Map<String, dynamic> && decoded['data'] != null)
+                ? decoded['data']
+                : decoded;
 
         return DiaryEntry.fromJson(noteData);
+      } else if (response.statusCode == 404) {
+        throw DiaryApiException('Note not found or you do not have permission to edit it.', 404);
+      } else if (response.statusCode == 401) {
+        throw DiaryApiException('Session expired. Please log in again.', 401);
       } else {
-        final message = _extractErrorMessage(response.body, 'Failed to update note (${response.statusCode})');
+        final message = _extractErrorMessage(
+            response.body, 'Failed to update note (${response.statusCode})');
         throw DiaryApiException(message, response.statusCode);
       }
     } catch (e) {
@@ -142,17 +196,30 @@ class DiaryService {
     }
   }
 
-  /// Delete a diary note in MongoDB via DELETE /api/notes/:id
-  Future<void> deleteEntry(String id) async {
-    final uri = Uri.parse('${ApiConfig.notesEndpoint}/$id');
+  /// Delete a diary note belonging to the authenticated user
+  Future<void> deleteEntry({
+    required String? token,
+    required String id,
+  }) async {
+    if (token == null || token.isEmpty) {
+      throw DiaryApiException('Authentication required. Please log in.', 401);
+    }
 
     try {
-      final response = await http.delete(uri, headers: _headers).timeout(_timeout);
+      final uri = Uri.parse('${ApiConfig.notesEndpoint}/$id');
+      final response = await http
+          .delete(uri, headers: _buildHeaders(token))
+          .timeout(_timeout);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         return;
+      } else if (response.statusCode == 404) {
+        throw DiaryApiException('Note not found or you do not have permission to delete it.', 404);
+      } else if (response.statusCode == 401) {
+        throw DiaryApiException('Session expired. Please log in again.', 401);
       } else {
-        final message = _extractErrorMessage(response.body, 'Failed to delete note (${response.statusCode})');
+        final message = _extractErrorMessage(
+            response.body, 'Failed to delete note (${response.statusCode})');
         throw DiaryApiException(message, response.statusCode);
       }
     } catch (e) {
@@ -161,69 +228,27 @@ class DiaryService {
     }
   }
 
-  /// Migrate any existing local SharedPreferences notes to MongoDB Atlas
-  /// This ensures existing user notes are never deleted or lost.
-  Future<int> migrateLocalEntriesIfNeeded() async {
-    final prefs = await SharedPreferences.getInstance();
-    final alreadyMigrated = prefs.getBool(_migratedKey) ?? false;
-    if (alreadyMigrated) {
-      return 0;
-    }
+  // --- User-Isolated Offline Caching ---
 
-    final String? localData = prefs.getString(_localKey);
-    if (localData == null || localData.isEmpty) {
-      await prefs.setBool(_migratedKey, true);
-      return 0;
-    }
-
-    try {
-      final List<dynamic> localJsonList = json.decode(localData);
-      int migratedCount = 0;
-
-      for (final item in localJsonList) {
-        final title = item['title']?.toString() ?? '';
-        final content = item['content']?.toString() ?? '';
-        if (title.isNotEmpty || content.isNotEmpty) {
-          try {
-            await createEntry(title.isEmpty ? 'Untitled' : title, content);
-            migratedCount++;
-          } catch (itemError) {
-            debugPrint('Failed to migrate item "$title": $itemError');
-          }
-        }
-      }
-
-      // Mark migration complete so we don't duplicate on subsequent app launches
-      await prefs.setBool(_migratedKey, true);
-      debugPrint('Migrated $migratedCount local entries to MongoDB Atlas.');
-      return migratedCount;
-    } catch (e) {
-      debugPrint('Error during local entries migration: $e');
-      return 0;
-    }
-  }
-
-  // --- Offline caching helpers for resilience ---
-
-  Future<void> _saveOfflineCache(List<DiaryEntry> entries) async {
+  Future<void> _saveUserOfflineCache(String userId, List<DiaryEntry> entries) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final data = json.encode(entries.map((e) => e.toJson()).toList());
-      await prefs.setString(_localKey, data);
+      await prefs.setString(_userCacheKey(userId), data);
     } catch (e) {
-      debugPrint('Offline cache save error: $e');
+      debugPrint('User offline cache save error: $e');
     }
   }
 
-  Future<List<DiaryEntry>> _loadOfflineCache() async {
+  Future<List<DiaryEntry>> _loadUserOfflineCache(String userId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final String? data = prefs.getString(_localKey);
+      final String? data = prefs.getString(_userCacheKey(userId));
       if (data == null || data.isEmpty) return [];
       final List<dynamic> list = json.decode(data);
       return list.map((e) => DiaryEntry.fromJson(e)).toList();
     } catch (e) {
-      debugPrint('Offline cache load error: $e');
+      debugPrint('User offline cache load error: $e');
       return [];
     }
   }

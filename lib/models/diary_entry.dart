@@ -4,6 +4,7 @@ class DiaryEntry {
   String content;
   final DateTime dateCreated;
   DateTime dateModified;
+  final String? userId;
 
   DiaryEntry({
     required this.id,
@@ -11,6 +12,7 @@ class DiaryEntry {
     required this.content,
     required this.dateCreated,
     required this.dateModified,
+    this.userId,
   });
 
   /// Convert to JSON format for local storage or client serialization
@@ -21,6 +23,7 @@ class DiaryEntry {
       'content': content,
       'dateCreated': dateCreated.toIso8601String(),
       'dateModified': dateModified.toIso8601String(),
+      if (userId != null) 'userId': userId,
     };
   }
 
@@ -63,6 +66,7 @@ class DiaryEntry {
       content: json['content']?.toString() ?? '',
       dateCreated: createdDate,
       dateModified: modifiedDate,
+      userId: json['userId']?.toString(),
     );
   }
 }

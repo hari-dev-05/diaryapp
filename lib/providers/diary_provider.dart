@@ -8,9 +8,35 @@ class DiaryProvider with ChangeNotifier {
   bool _isLoading = false;
   String? _errorMessage;
 
+  String? _token;
+  String? _userId;
+
   List<DiaryEntry> get entries => _entries;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
+
+  /// Update active authentication state (called via ChangeNotifierProxyProvider or explicitly)
+  void updateAuth(String? token, String? userId) {
+    final changedUser = _userId != userId;
+    _token = token;
+    _userId = userId;
+
+    if (token == null || changedUser) {
+      // Clear in-memory notes when logging out or switching users
+      _entries = [];
+      _errorMessage = null;
+      notifyListeners();
+    }
+  }
+
+  /// Explicitly clear notes and state on logout
+  void clearNotesOnLogout() {
+    _entries = [];
+    _token = null;
+    _userId = null;
+    _errorMessage = null;
+    notifyListeners();
+  }
 
   /// Clear any active error message
   void clearError() {
@@ -18,18 +44,23 @@ class DiaryProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  /// Load entries from MongoDB Atlas via API
+  /// Load notes belonging to the authenticated user
   Future<void> loadEntries() async {
+    if (_token == null || _userId == null) {
+      _entries = [];
+      return;
+    }
+
     _isLoading = true;
     _errorMessage = null;
     notifyListeners();
 
     try {
-      // Migrate any legacy local storage notes to MongoDB on initial connection
-      await _service.migrateLocalEntriesIfNeeded();
-
-      _entries = await _service.loadEntries();
-      // Ensure newest entries appear first
+      _entries = await _service.loadEntries(
+        token: _token,
+        userId: _userId,
+      );
+      // Sort newest modified first
       _entries.sort((a, b) => b.dateModified.compareTo(a.dateModified));
       _errorMessage = null;
     } catch (e) {
@@ -41,10 +72,19 @@ class DiaryProvider with ChangeNotifier {
     }
   }
 
-  /// Create a new diary note in MongoDB via API
+  /// Create a new diary note for the authenticated user
   Future<void> addEntry(String title, String content) async {
+    if (_token == null || _userId == null) {
+      throw DiaryApiException('Authentication required. Please log in.');
+    }
+
     try {
-      final newEntry = await _service.createEntry(title, content);
+      final newEntry = await _service.createEntry(
+        token: _token,
+        userId: _userId,
+        title: title,
+        content: content,
+      );
       _entries.insert(0, newEntry);
       _errorMessage = null;
       notifyListeners();
@@ -55,10 +95,19 @@ class DiaryProvider with ChangeNotifier {
     }
   }
 
-  /// Update an existing note in MongoDB via API
+  /// Update an existing note owned by the authenticated user
   Future<void> updateEntry(String id, String newTitle, String newContent) async {
+    if (_token == null) {
+      throw DiaryApiException('Authentication required. Please log in.');
+    }
+
     try {
-      final updated = await _service.updateEntry(id, newTitle, newContent);
+      final updated = await _service.updateEntry(
+        token: _token,
+        id: id,
+        title: newTitle,
+        content: newContent,
+      );
       final index = _entries.indexWhere((e) => e.id == id);
       if (index != -1) {
         _entries[index] = updated;
@@ -73,10 +122,17 @@ class DiaryProvider with ChangeNotifier {
     }
   }
 
-  /// Delete a note in MongoDB via API
+  /// Delete a note owned by the authenticated user
   Future<void> deleteEntry(String id) async {
+    if (_token == null) {
+      throw DiaryApiException('Authentication required. Please log in.');
+    }
+
     try {
-      await _service.deleteEntry(id);
+      await _service.deleteEntry(
+        token: _token,
+        id: id,
+      );
       _entries.removeWhere((e) => e.id == id);
       _errorMessage = null;
       notifyListeners();

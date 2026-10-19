@@ -12,6 +12,14 @@ const noteSchema = new mongoose.Schema(
       required: [true, 'Content is required'],
       trim: true,
     },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      index: true,
+      // Existing legacy notes created before authentication do not have userId.
+      // Keeping this optional at schema level ensures legacy documents remain valid in Atlas,
+      // while new notes will always be tagged with the authenticated user's ID.
+    },
   },
   {
     timestamps: true, // Automatically manages createdAt and updatedAt as Dates

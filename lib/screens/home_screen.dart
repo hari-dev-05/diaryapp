@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../providers/diary_provider.dart';
+import '../providers/auth_provider.dart';
 import 'editor_screen.dart';
 import 'view_screen.dart';
 
@@ -40,6 +41,37 @@ class _HomeScreenState extends State<HomeScreen> {
             tooltip: 'Sync with server',
             onPressed: () {
               Provider.of<DiaryProvider>(context, listen: false).loadEntries();
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Log out',
+            onPressed: () async {
+              final auth = Provider.of<AuthProvider>(context, listen: false);
+              final userName = auth.user?.name ?? 'User';
+
+              final confirm = await showDialog<bool>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('Log Out'),
+                  content: Text('Log out of $userName\'s personal diary?'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('Cancel'),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('Log Out', style: TextStyle(color: Colors.red)),
+                    ),
+                  ],
+                ),
+              );
+
+              if (confirm == true && context.mounted) {
+                Provider.of<DiaryProvider>(context, listen: false).clearNotesOnLogout();
+                await Provider.of<AuthProvider>(context, listen: false).logout();
+              }
             },
           ),
         ],

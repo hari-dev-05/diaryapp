@@ -1,20 +1,25 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const Note = require('../models/Note');
+const { protect } = require('../middleware/auth');
 
 const router = express.Router();
 
 // Helper to validate MongoDB ObjectId
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
+// Enforce authentication on all note routes
+router.use(protect);
+
 /**
  * @route   GET /api/notes
- * @desc    Retrieve all diary notes sorted by newest first
+ * @desc    Retrieve all diary notes belonging to the authenticated user (newest first)
  */
 router.get('/', async (req, res, next) => {
   try {
-    // Sort by createdAt descending (newest first)
-    const notes = await Note.find().sort({ createdAt: -1 });
+    // Strictly filter by authenticated user ID derived from verified JWT
+    const notes = await Note.find({ userId: req.user._id }).sort({ createdAt: -1 });
+
     return res.status(200).json({
       success: true,
       count: notes.length,
@@ -27,7 +32,7 @@ router.get('/', async (req, res, next) => {
 
 /**
  * @route   GET /api/notes/:id
- * @desc    Retrieve a specific note by ID
+ * @desc    Retrieve a specific note only if owned by the authenticated user
  */
 router.get('/:id', async (req, res, next) => {
   try {
@@ -40,12 +45,13 @@ router.get('/:id', async (req, res, next) => {
       });
     }
 
-    const note = await Note.findById(id);
+    // Must match both the note ID and the authenticated user's ID
+    const note = await Note.findOne({ _id: id, userId: req.user._id });
 
     if (!note) {
       return res.status(404).json({
         success: false,
-        message: `Note with id ${id} not found`,
+        message: 'Note not found',
       });
     }
 
@@ -60,7 +66,7 @@ router.get('/:id', async (req, res, next) => {
 
 /**
  * @route   POST /api/notes
- * @desc    Save a new diary note
+ * @desc    Save a new diary note assigned to the authenticated user
  */
 router.post('/', async (req, res, next) => {
   try {
@@ -81,9 +87,11 @@ router.post('/', async (req, res, next) => {
       });
     }
 
+    // Assign userId strictly from req.user._id (ignoring any client-supplied userId)
     const newNote = await Note.create({
       title: title.trim(),
       content: content.trim(),
+      userId: req.user._id,
     });
 
     return res.status(201).json({
@@ -98,7 +106,7 @@ router.post('/', async (req, res, next) => {
 
 /**
  * @route   PUT /api/notes/:id
- * @desc    Update an existing note
+ * @desc    Update an existing note only if owned by the authenticated user
  */
 router.put('/:id', async (req, res, next) => {
   try {
@@ -138,15 +146,20 @@ router.put('/:id', async (req, res, next) => {
       });
     }
 
-    const updatedNote = await Note.findByIdAndUpdate(id, updateData, {
-      new: true,
-      runValidators: true,
-    });
+    // Ensure note exists and belongs to the authenticated user
+    const updatedNote = await Note.findOneAndUpdate(
+      { _id: id, userId: req.user._id },
+      updateData,
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
 
     if (!updatedNote) {
       return res.status(404).json({
         success: false,
-        message: `Note with id ${id} not found`,
+        message: 'Note not found',
       });
     }
 
@@ -162,7 +175,7 @@ router.put('/:id', async (req, res, next) => {
 
 /**
  * @route   DELETE /api/notes/:id
- * @desc    Delete a note
+ * @desc    Delete a note only if owned by the authenticated user
  */
 router.delete('/:id', async (req, res, next) => {
   try {
@@ -175,12 +188,13 @@ router.delete('/:id', async (req, res, next) => {
       });
     }
 
-    const deletedNote = await Note.findByIdAndDelete(id);
+    // Ensure note exists and belongs to the authenticated user before deleting
+    const deletedNote = await Note.findOneAndDelete({ _id: id, userId: req.user._id });
 
     if (!deletedNote) {
       return res.status(404).json({
         success: false,
-        message: `Note with id ${id} not found`,
+        message: 'Note not found',
       });
     }
 

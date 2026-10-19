@@ -48,3 +48,10 @@ app.*.map.json
 backend/node_modules/
 backend/.env
 
+# Flutter Environment Files
+env.json
+*.env.json
+.env*
+!.env.example
+!env.json.example
+
